@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <title>Unity Web Player | Cajero</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico" />
+    <link rel="stylesheet" href="TemplateData/style.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100vw;
+        height: 100vh;
+        background: black;
+        overflow: hidden;
+      }
+
+      #unity-container {
+        width: 100vw;
+        height: 100vh;
+        background-color: black;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .aspect-wrapper {
+        position: relative;
+        background: black;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      #unity-canvas {
+        display: block;
+        background: black;
+      }
+
+      #unity-loading-bar {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 320px;
+        text-align: center;
+        z-index: 10;
+      }
+
+      #unity-progress-bar-empty {
+        width: 100%;
+        height: 24px;
+        background: #555;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+
+      #unity-progress-bar-full {
+        height: 100%;
+        background: #fff;
+        width: 0%;
+      }
+
+      #unity-warning,
+      #unity-footer {
+        position: absolute;
+        width: 100%;
+        z-index: 1;
+      }
+
+      #unity-footer {
+        bottom: 10px;
+        text-align: center;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="unity-container">
+      <div class="aspect-wrapper">
+        <canvas id="unity-canvas" tabindex="-1"></canvas>
+
+        <div id="unity-loading-bar">
+          <div id="unity-logo"></div>
+          <div id="unity-progress-bar-empty">
+            <div id="unity-progress-bar-full"></div>
+          </div>
+        </div>
+
+        <div id="unity-warning"></div>
+
+        <div id="unity-footer">
+          <div id="unity-logo-title-footer"></div>
+          <!-- <div id="unity-fullscreen-button"></div> -->
+          <!-- <div id="unity-build-title">Cajero</div> -->
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const canvas = document.querySelector("#unity-canvas");
+
+      function unityShowBanner(msg, type) {
+        const warningBanner = document.querySelector("#unity-warning");
+        function updateBannerVisibility() {
+          warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+        }
+        const div = document.createElement('div');
+        div.innerHTML = msg;
+        warningBanner.appendChild(div);
+        if (type === 'error') div.style = 'background: red; padding: 10px;';
+        else if (type === 'warning') {
+          div.style = 'background: yellow; padding: 10px;';
+          setTimeout(() => {
+            warningBanner.removeChild(div);
+            updateBannerVisibility();
+          }, 5000);
+        }
+        updateBannerVisibility();
+      }
+
+      const buildUrl = "Build";
+      const loaderUrl = buildUrl + "/WebGL.loader.js";
+
+      const config = {
+        dataUrl: buildUrl + "/WebGL.data",
+        frameworkUrl: buildUrl + "/WebGL.framework.js",
+        codeUrl: buildUrl + "/WebGL.wasm",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "Cajero",
+        productVersion: "0.1.0",
+        showBanner: unityShowBanner,
+        matchWebGLToCanvasSize: true
+      };
+
+      function setCanvasAspectRatio() {
+        const container = document.querySelector('.aspect-wrapper');
+        const containerWidth = window.innerWidth;
+        const containerHeight = window.innerHeight;
+        const aspectRatio = 16 / 10;
+
+        let newWidth = containerWidth;
+        let newHeight = containerWidth / aspectRatio;
+
+        if (newHeight > containerHeight) {
+          newHeight = containerHeight;
+          newWidth = containerHeight * aspectRatio;
+        }
+
+        canvas.style.width = newWidth + "px";
+        canvas.style.height = newHeight + "px";
+
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+      }
+
+      document.querySelector("#unity-loading-bar").style.display = "block";
+
+      const script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = () => {
+        setCanvasAspectRatio(); // Initial size
+
+        createUnityInstance(canvas, config, (progress) => {
+          document.querySelector("#unity-progress-bar-full").style.width = 100 * progress + "%";
+        }).then((unityInstance) => {
+          document.querySelector("#unity-loading-bar").style.display = "none";
+
+          window.addEventListener("resize", () => {
+            setCanvasAspectRatio(); // Resize on window change
+          });
+
+          const fullscreenBtn = document.querySelector("#unity-fullscreen-button");
+          if (fullscreenBtn) {
+            fullscreenBtn.onclick = () => {
+              unityInstance.SetFullscreen(1);
+            };
+          }
+        }).catch((message) => {
+          alert(message);
+        });
+      };
+
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>
