@@ -2,38 +2,60 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const WebSocket = require('ws');
-const { Client } = require('pg'); // PostgreSQL client
+const mysql = require('mysql2/promise');
+const cors = require('cors');
+const fs = require('fs');
+require('dotenv').config();
 
 const app = express();
-const PORT = 9094;
+const PORT = process.env.PORT || 9094;
 
-// Serve Unity WebGL build
-app.use('/Cubiertos', express.static(path.join(__dirname, 'Cubiertos')));
-app.get('/Cubiertos', (req, res) => {
-  res.sendFile(path.join(__dirname, 'Cubiertos/index.html'));
+// ✅ CORS: Permitir peticiones desde frontend
+app.use(cors({
+  origin: ['http://localhost:3000', 'http://frontend:3000'],
+  credentials: true
+}));
+
+// ✅ Servir múltiples juegos Unity WebGL dinámicamente
+app.use('/games/:gameName', (req, res, next) => {
+  const gameName = req.params.gameName;
+  const gamePath = path.join(__dirname, 'games', gameName);
+
+  // Si no existe la carpeta del juego, devuelve 404
+  if (!fs.existsSync(gamePath)) {
+    return res.status(404).send('Juego no encontrado');
+  }
+
+  // Sirve contenido estático (index.html, Build/, TemplateData/)
+  express.static(gamePath)(req, res, next);
 });
 
-// Set up PostgreSQL client
-const pgClient = new Client({
-  user: 'postgres',   // Replace with your PostgreSQL username
-  host: 'localhost',      // Replace with your PostgreSQL host (use 'localhost' for local)
-  database: 'Data',    // Replace with your PostgreSQL database name
-  password: 'PGADMIN',  // Replace with your PostgreSQL password
-  port: 5432,             // Default port for PostgreSQL
+// ✅ Redireccionar directamente al index.html del juego
+app.get('/games/:gameName', (req, res) => {
+  const gameName = req.params.gameName;
+  const indexPath = path.join(__dirname, 'games', gameName, 'index.html');
+
+  if (!fs.existsSync(indexPath)) {
+    return res.status(404).send('Archivo index.html no encontrado');
+  }
+
+  res.sendFile(indexPath);
 });
 
-// Connect to PostgreSQL
-pgClient.connect()
-  .then(() => console.log('Connected to PostgreSQL'))
-  .catch((err) => console.error('Failed to connect to PostgreSQL', err));
+// ✅ Conexión a MySQL
+const dbPool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || 'admin',
+  database: process.env.DB_NAME || 'kala',
+  port: process.env.DB_PORT || 3306,
+});
 
-// Create HTTP server and WebSocket server
+// ✅ WebSocket para conexión Unity
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-
 const clients = new Set();
 
-// Track each client's userId from query param
 wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.replace(/^.*\?/, ''));
   const userId = params.get('userId');
@@ -41,8 +63,6 @@ wss.on('connection', (ws, req) => {
   clients.add(ws);
 
   console.log(`Unity client connected for userId: ${userId}`);
-
-  // Send a message to the client when connected
   ws.send(JSON.stringify({ message: 'Connected to WebSocket server.' }));
 
   ws.on('close', () => {
@@ -52,45 +72,49 @@ wss.on('connection', (ws, req) => {
 
   ws.on('error', (error) => {
     console.error(`WebSocket error for userId ${userId}:`, error);
-    clients.delete(ws); // Remove the client on error
+    clients.delete(ws);
   });
 });
 
-// Endpoint to handle the POST request from Unity and insert data into PostgreSQL
-app.use(express.json()); // Middleware to parse JSON bodies
+// ✅ Parseo de JSON
+app.use(express.json());
 
-app.post('/send-metrics', (req, res) => {
-  console.log('Received request body:', req.body); // Log the received data
-
+// ✅ Guardar métricas del juego
+app.post('/send-metrics/:game', async (req, res) => {
   const { userId, tiempo, puntaje, errores } = req.body;
+  const game = req.params.game;
 
-  if (!userId || !tiempo || !puntaje || !errores) {
-    return res.status(400).send('Missing required metrics.');
+  if (!userId || tiempo == null || puntaje == null || errores == null) {
+    return res.status(400).send('Faltan métricas');
   }
 
-  const query = 'INSERT INTO cubiertos_metrics (user_id, tiempo, puntaje, errores) VALUES ($1, $2, $3, $4)';
-  const values = [userId, tiempo, puntaje, errores];
+  const table = `${game.toLowerCase()}_metrics`;
 
-  pgClient.query(query, values)
-    .then(() => {
-      console.log('Metrics inserted into cubiertos_metrics');
-      res.status(200).send('Metrics inserted successfully.');
-    })
-    .catch((err) => {
-      console.error('Error inserting metrics into cubiertos_metrics:', err);
-      res.status(500).send('Error inserting metrics into PostgreSQL.');
-    });
+  try {
+    const conn = await dbPool.getConnection();
+    await conn.query(
+      `INSERT INTO \`${table}\` (user_id, tiempo, puntaje, errores) VALUES (?, ?, ?, ?)`,
+      [userId, tiempo, puntaje, errores]
+    );
+    conn.release();
+    console.log(`✅ Métricas insertadas en ${table}`);
+    res.status(200).send('Métricas insertadas correctamente.');
+  } catch (err) {
+    console.error(`❌ Error al insertar en ${table}:`, err);
+    res.status(500).send('Error al insertar métricas.');
+  }
 });
 
-// Graceful server shutdown
+// ✅ Cierre limpio
 process.on('SIGINT', async () => {
-  console.log('Shutting down the server gracefully...');
-  await pgClient.end(); // Close the PostgreSQL connection
+  console.log('🛑 Apagando servidor...');
+  await dbPool.end();
   server.close(() => {
-    console.log('Server closed.');
+    console.log('🧼 Servidor cerrado limpiamente.');
   });
 });
 
+// ✅ Arrancar servidor
 server.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`✅ Juegos-service corriendo en: http://localhost:${PORT}`);
 });
