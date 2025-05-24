@@ -7,24 +7,26 @@ const cors = require('cors');
 const fs = require('fs');
 require('dotenv').config();
 
+const { Kafka } = require('kafkajs');
 const startKafkaConsumer = require('./kafkaConsumer');
 
 const app = express();
 const PORT = process.env.PORT || 9094;
 
-// Store userId → game mapping from Kafka
-const sessionMap = {};
+// Kafka Producer
+const kafka = new Kafka({ brokers: [process.env.KAFKA_BROKERS] });
+const producer = kafka.producer();
 
-// Set of WebSocket clients
+// Store userId → game mapping
+const sessionMap = {};
 const clients = new Set();
 
-// CORS: allow frontend access
 app.use(cors({
   origin: ['http://localhost:3000', 'http://frontend:3000'],
   credentials: true
 }));
 
-// Serve Unity WebGL games dynamically
+// Serve Unity WebGL games
 app.use('/games/:gameName', (req, res, next) => {
   const gameName = req.params.gameName.toLowerCase();
   const gamePath = path.join(__dirname, 'games', gameName);
@@ -39,7 +41,6 @@ app.get('/games/:gameName', (req, res) => {
   res.sendFile(indexPath);
 });
 
-// Optional route to play based on Kafka-mapped session
 app.get('/play/:userId', (req, res) => {
   const userId = req.params.userId;
   const game = sessionMap[userId];
@@ -49,7 +50,7 @@ app.get('/play/:userId', (req, res) => {
   res.sendFile(indexPath);
 });
 
-// MySQL DB connection
+// MySQL
 const dbPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -58,7 +59,7 @@ const dbPool = mysql.createPool({
   port: process.env.DB_PORT || 3306,
 });
 
-// HTTP + WebSocket server
+// WebSocket server
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
@@ -67,21 +68,39 @@ wss.on('connection', (ws, req) => {
   const userId = params.get('userId');
   ws.userId = userId;
   clients.add(ws);
-  console.log(`Unity client connected (userId: ${userId})`);
+  console.log(`WebSocket client connected (userId: ${userId})`);
   ws.send(JSON.stringify({ type: 'welcome', message: 'WebSocket connected.' }));
+
+  ws.on('message', async (msg) => {
+    try {
+      const { userId, game } = JSON.parse(msg);
+      if (!userId || !game) {
+        console.warn('Invalid message format');
+        return;
+      }
+
+      console.log(`📨 Sending to Kafka: ${userId} → ${game}`);
+      await producer.send({
+        topic: process.env.KAFKA_TOPIC,
+        messages: [{ value: JSON.stringify({ userId, game }) }]
+      });
+    } catch (err) {
+      console.error('Error handling WS message:', err);
+    }
+  });
 
   ws.on('close', () => {
     clients.delete(ws);
-    console.log(`Client disconnected (userId: ${userId})`);
+    console.log(`WebSocket client disconnected (${userId})`);
   });
 
   ws.on('error', (err) => {
     clients.delete(ws);
-    console.error(`WS error (userId: ${userId}):`, err);
+    console.error(`WS error (${userId}):`, err);
   });
 });
 
-// Metrics API from Unity
+// Save metrics
 app.use(express.json());
 
 app.post('/send-metrics/:game', async (req, res) => {
@@ -99,7 +118,7 @@ app.post('/send-metrics/:game', async (req, res) => {
       [userId, tiempo, puntaje, errores]
     );
     conn.release();
-    console.log(`Inserted metrics into ${table}`);
+    console.log(`Metrics inserted into ${table}`);
     res.send('Metrics saved.');
   } catch (err) {
     console.error(`DB error (${table}):`, err);
@@ -107,13 +126,12 @@ app.post('/send-metrics/:game', async (req, res) => {
   }
 });
 
-// ✅ Kafka listener → maps userId to game + notifies Unity via WebSocket
+// Kafka → WebSocket
 startKafkaConsumer(({ userId, game }) => {
   const normalizedGame = game.toLowerCase();
   sessionMap[userId] = normalizedGame;
-  console.log(`🎮 Mapped user ${userId} → ${normalizedGame}`);
+  console.log(`🎮 Kafka assigned ${userId} → ${normalizedGame}`);
 
-  // Notify Unity if connected
   for (const ws of clients) {
     if (ws.userId === userId) {
       ws.send(JSON.stringify({
@@ -125,16 +143,20 @@ startKafkaConsumer(({ userId, game }) => {
   }
 });
 
-// ✅ Clean shutdown
+// Startup
+(async () => {
+  await producer.connect();
+  server.listen(PORT, () => {
+    console.log(`🚀 Game server running on http://localhost:${PORT}`);
+  });
+})();
+
+// Clean shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down...');
   await dbPool.end();
+  await producer.disconnect();
   server.close(() => {
-    console.log('Server closed');
+    console.log('Server closed cleanly');
   });
-});
-
-// ✅ Start the server
-server.listen(PORT, () => {
-  console.log(`Game server running on http://localhost:${PORT}`);
 });
