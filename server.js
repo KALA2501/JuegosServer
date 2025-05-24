@@ -7,42 +7,49 @@ const cors = require('cors');
 const fs = require('fs');
 require('dotenv').config();
 
+const startKafkaConsumer = require('./kafkaConsumer');
+
 const app = express();
 const PORT = process.env.PORT || 9094;
 
-// ✅ CORS: Permitir peticiones desde frontend
+// Store userId → game mapping from Kafka
+const sessionMap = {};
+
+// Set of WebSocket clients
+const clients = new Set();
+
+// CORS: allow frontend access
 app.use(cors({
   origin: ['http://localhost:3000', 'http://frontend:3000'],
   credentials: true
 }));
 
-// ✅ Servir múltiples juegos Unity WebGL dinámicamente
+// Serve Unity WebGL games dynamically
 app.use('/games/:gameName', (req, res, next) => {
-  const gameName = req.params.gameName;
+  const gameName = req.params.gameName.toLowerCase();
   const gamePath = path.join(__dirname, 'games', gameName);
-
-  // Si no existe la carpeta del juego, devuelve 404
-  if (!fs.existsSync(gamePath)) {
-    return res.status(404).send('Juego no encontrado');
-  }
-
-  // Sirve contenido estático (index.html, Build/, TemplateData/)
+  if (!fs.existsSync(gamePath)) return res.status(404).send('Game not found');
   express.static(gamePath)(req, res, next);
 });
 
-// ✅ Redireccionar directamente al index.html del juego
 app.get('/games/:gameName', (req, res) => {
-  const gameName = req.params.gameName;
+  const gameName = req.params.gameName.toLowerCase();
   const indexPath = path.join(__dirname, 'games', gameName, 'index.html');
-
-  if (!fs.existsSync(indexPath)) {
-    return res.status(404).send('Archivo index.html no encontrado');
-  }
-
+  if (!fs.existsSync(indexPath)) return res.status(404).send('index.html not found');
   res.sendFile(indexPath);
 });
 
-// ✅ Conexión a MySQL
+// Optional route to play based on Kafka-mapped session
+app.get('/play/:userId', (req, res) => {
+  const userId = req.params.userId;
+  const game = sessionMap[userId];
+  if (!game) return res.status(404).send('User has no game assigned');
+  const indexPath = path.join(__dirname, 'games', game, 'index.html');
+  if (!fs.existsSync(indexPath)) return res.status(404).send('Game not found');
+  res.sendFile(indexPath);
+});
+
+// MySQL DB connection
 const dbPool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   user: process.env.DB_USER || 'root',
@@ -51,45 +58,40 @@ const dbPool = mysql.createPool({
   port: process.env.DB_PORT || 3306,
 });
 
-// ✅ WebSocket para conexión Unity
+// HTTP + WebSocket server
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
-const clients = new Set();
 
 wss.on('connection', (ws, req) => {
   const params = new URLSearchParams(req.url.replace(/^.*\?/, ''));
   const userId = params.get('userId');
   ws.userId = userId;
   clients.add(ws);
-
-  console.log(`Unity client connected for userId: ${userId}`);
-  ws.send(JSON.stringify({ message: 'Connected to WebSocket server.' }));
+  console.log(`Unity client connected (userId: ${userId})`);
+  ws.send(JSON.stringify({ type: 'welcome', message: 'WebSocket connected.' }));
 
   ws.on('close', () => {
     clients.delete(ws);
-    console.log(`Unity client for ${userId} disconnected`);
+    console.log(`Client disconnected (userId: ${userId})`);
   });
 
-  ws.on('error', (error) => {
-    console.error(`WebSocket error for userId ${userId}:`, error);
+  ws.on('error', (err) => {
     clients.delete(ws);
+    console.error(`WS error (userId: ${userId}):`, err);
   });
 });
 
-// ✅ Parseo de JSON
+// Metrics API from Unity
 app.use(express.json());
 
-// ✅ Guardar métricas del juego
 app.post('/send-metrics/:game', async (req, res) => {
   const { userId, tiempo, puntaje, errores } = req.body;
-  const game = req.params.game;
-
+  const game = req.params.game.toLowerCase();
   if (!userId || tiempo == null || puntaje == null || errores == null) {
-    return res.status(400).send('Faltan métricas');
+    return res.status(400).send('Missing metrics fields.');
   }
 
-  const table = `${game.toLowerCase()}_metrics`;
-
+  const table = `${game}_metrics`;
   try {
     const conn = await dbPool.getConnection();
     await conn.query(
@@ -97,24 +99,42 @@ app.post('/send-metrics/:game', async (req, res) => {
       [userId, tiempo, puntaje, errores]
     );
     conn.release();
-    console.log(`✅ Métricas insertadas en ${table}`);
-    res.status(200).send('Métricas insertadas correctamente.');
+    console.log(`Inserted metrics into ${table}`);
+    res.send('Metrics saved.');
   } catch (err) {
-    console.error(`❌ Error al insertar en ${table}:`, err);
-    res.status(500).send('Error al insertar métricas.');
+    console.error(`DB error (${table}):`, err);
+    res.status(500).send('DB error.');
   }
 });
 
-// ✅ Cierre limpio
+// ✅ Kafka listener → maps userId to game + notifies Unity via WebSocket
+startKafkaConsumer(({ userId, game }) => {
+  const normalizedGame = game.toLowerCase();
+  sessionMap[userId] = normalizedGame;
+  console.log(`🎮 Mapped user ${userId} → ${normalizedGame}`);
+
+  // Notify Unity if connected
+  for (const ws of clients) {
+    if (ws.userId === userId) {
+      ws.send(JSON.stringify({
+        type: 'session-start',
+        userId,
+        game: normalizedGame
+      }));
+    }
+  }
+});
+
+// ✅ Clean shutdown
 process.on('SIGINT', async () => {
-  console.log('🛑 Apagando servidor...');
+  console.log('Shutting down...');
   await dbPool.end();
   server.close(() => {
-    console.log('🧼 Servidor cerrado limpiamente.');
+    console.log('Server closed');
   });
 });
 
-// ✅ Arrancar servidor
+// ✅ Start the server
 server.listen(PORT, () => {
-  console.log(`✅ Juegos-service corriendo en: http://localhost:${PORT}`);
+  console.log(`Game server running on http://localhost:${PORT}`);
 });
